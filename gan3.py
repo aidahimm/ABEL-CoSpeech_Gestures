@@ -94,29 +94,41 @@ train_df = normalize_df(train_df)
 val_df = normalize_df(val_df)
 test_df = normalize_df(test_df)
 
-def apply_pca(train_df, val_df, test_df, n_components=100):
+# Separate speech and joint position features, including the time column
+def separate_features(df):
+    speech_features = df.filter(regex='^lemma_|^word_emb_|^time|^tag_|^dep_')
+    joint_features = df.drop(columns=[col for col in speech_features.columns if col != 'time'])
+    if 'time' not in joint_features.columns:
+        joint_features['time'] = df['time']
+    joint_features = joint_features.drop(columns=['global_id'] )  # Assuming 'global_id' is not a feature
+    return speech_features, joint_features
+
+# Separate speech and joint position features, including time
+train_speech, train_joint = separate_features(train_df)
+val_speech, val_joint = separate_features(val_df)
+test_speech, test_joint = separate_features(test_df)
+
+# Apply PCA
+def apply_pca(train, val, test, n_components):
     pca = PCA(n_components=n_components)
-    train_pca = pca.fit_transform(train_df)
-    val_pca = pca.transform(val_df)
-    test_pca = pca.transform(test_df)
+    train_pca = pca.fit_transform(train)
+    val_pca = pca.transform(val)
+    test_pca = pca.transform(test)
     return train_pca, val_pca, test_pca
 
-# Apply PCA to your dataframes
-n_components = 100  # Number of principal components
-train_pca, val_pca, test_pca = apply_pca(train_df, val_df, test_df, n_components)
+n_components_speech = 50
+n_components_joint = 50
+train_speech_pca, val_speech_pca, test_speech_pca = apply_pca(train_speech, val_speech, test_speech, n_components_speech)
+train_joint_pca, val_joint_pca, test_joint_pca = apply_pca(train_joint, val_joint, test_joint, n_components_joint)
 
-# Convert PCA data to tensors
-train_tensor = torch.tensor(train_pca, dtype=torch.float32)
-val_tensor = torch.tensor(val_pca, dtype=torch.float32)
-test_tensor = torch.tensor(test_pca, dtype=torch.float32)
+# Convert to tensors
+train_speech_tensor = torch.tensor(train_speech_pca, dtype=torch.float32)
+val_speech_tensor = torch.tensor(val_speech_pca, dtype=torch.float32)
+test_speech_tensor = torch.tensor(test_speech_pca, dtype=torch.float32)
 
-# # Convert dataframes to tensors
-# def dataframe_to_tensor(df):
-#     return torch.tensor(df.values, dtype=torch.float32)
-
-# train_tensor = dataframe_to_tensor(train_df)
-# val_tensor = dataframe_to_tensor(val_df)
-# test_tensor = dataframe_to_tensor(test_df)
+train_joint_tensor = torch.tensor(train_joint_pca, dtype=torch.float32)
+val_joint_tensor = torch.tensor(val_joint_pca, dtype=torch.float32)
+test_joint_tensor = torch.tensor(test_joint_pca, dtype=torch.float32)
 
 def create_sequences(data, seq_length):
     sequences = []
@@ -124,20 +136,24 @@ def create_sequences(data, seq_length):
         sequences.append(data[i:i+seq_length].unsqueeze(0))  # Add batch dimension
     return torch.cat(sequences, dim=0)
 
-seq_length = 100
+seq_length = 150
 
-train_sequences = create_sequences(train_tensor, seq_length)
-val_sequences = create_sequences(val_tensor, seq_length)
-test_sequences = create_sequences(test_tensor, seq_length)
+train_speech_sequences = create_sequences(train_speech_tensor, seq_length)
+val_speech_sequences = create_sequences(val_speech_tensor, seq_length)
+test_speech_sequences = create_sequences(test_speech_tensor, seq_length)
 
-# Update your DataLoaders
-train_loader = DataLoader(TensorDataset(train_sequences), batch_size=64, shuffle=True)
-val_loader = DataLoader(TensorDataset(val_sequences), batch_size=64, shuffle=False)
-test_loader = DataLoader(TensorDataset(test_sequences), batch_size=64, shuffle=False)
+train_joint_sequences = create_sequences(train_joint_tensor, seq_length)
+val_joint_sequences = create_sequences(val_joint_tensor, seq_length)
+test_joint_sequences = create_sequences(test_joint_tensor, seq_length)
 
-print(train_tensor.shape)
-number_of_features = train_tensor.shape[1]
+# Create DataLoaders
+train_loader = DataLoader(TensorDataset(train_speech_sequences, train_joint_sequences), batch_size=64, shuffle=True)
+val_loader = DataLoader(TensorDataset(val_speech_sequences, val_joint_sequences), batch_size=64, shuffle=False)
+test_loader = DataLoader(TensorDataset(test_speech_sequences, test_joint_sequences), batch_size=64, shuffle=False)
 
+print(train_joint_tensor.shape)
+print(train_speech_tensor.shape)
+number_of_features = train_speech_tensor.shape[1]
 # Define the LSTM-based Generator
 class Generator(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, seq_length):
@@ -176,18 +192,33 @@ num_layers = 2
 output_dim = 1
 batch_size = 64
 num_epochs = 25
-learning_rate_g = 0.0001  # Lower learning rate for Generator
-learning_rate_d = 0.0004  # Slightly higher learning rate for Discriminator
-lambda_gp = 10  # Gradient penalty coefficient
+learning_rate_g = 0.00001  # Lower learning rate for Generator
+learning_rate_d = 0.0001  # Slightly higher learning rate for Discriminator
+lambda_gp = 5  # Gradient penalty coefficient
+
+def weights_init(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.LSTM):
+        for param in m.parameters():
+            if len(param.shape) >= 2:
+                nn.init.xavier_uniform_(param.data)
+            else:
+                nn.init.zeros_(param.data)
 
 # Loss function
 criterion = nn.BCELoss()
 
 # Update model initialization
-input_dim = train_sequences.shape[2]  # Number of features
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-netG = Generator(input_dim, hidden_dim, input_dim, num_layers, seq_length).to(device)
-netD = Discriminator(input_dim, hidden_dim, output_dim, num_layers).to(device)
+input_dim = train_speech_sequences.shape[2]
+netG = Generator(input_dim, hidden_dim, output_dim, num_layers, seq_length).to(device)
+netD = Discriminator(output_dim, hidden_dim, 1, num_layers).to(device)
+
+netG.apply(weights_init)
+netD.apply(weights_init)
 
 # Add gradient clipping to prevent exploding gradients
 torch.nn.utils.clip_grad_norm_(netD.parameters(), max_norm=1.0)
@@ -201,8 +232,8 @@ real_label = 0.9
 fake_label = 0.1
 
 # Optimizers
-optimizerG = optim.Adam(netG.parameters(), lr=learning_rate_g)
-optimizerD = optim.Adam(netD.parameters(), lr=learning_rate_d)
+optimizerG = optim.RMSprop(netG.parameters(), lr=learning_rate_g)
+optimizerD = optim.RMSprop(netD.parameters(), lr=learning_rate_d)
 
 # Gradient penalty computation
 def compute_gradient_penalty(D, real_samples, fake_samples):
@@ -223,57 +254,49 @@ def compute_gradient_penalty(D, real_samples, fake_samples):
     return gradient_penalty
 
 # Training Loop
-
 print("Starting Training Loop...")
 for epoch in range(num_epochs):
-    for i, data in enumerate(train_loader, 0):
-        # Update D: maximize log(D(x)) + log(1 - D(G(z)))
+    for i, (speech_data, joint_data) in enumerate(train_loader, 0):
         netD.zero_grad()
-        # Train with real data
-        real_cpu = data[0].to(device)
-        b_size = real_cpu.size(0)
-        label = torch.full((b_size, 1), real_label, dtype=torch.float, device=device)  # Change shape to [b_size, 1]
-        output = netD(real_cpu)
-        errD_real = criterion(output, label)
-        errD_real.backward()
-        D_x = output.mean().item()
-
-        # Train with fake data
-        noise = torch.randn(b_size, seq_length, input_dim, device=device)
-        fake = netG(noise)
-        label.fill_(fake_label)
-        output = netD(fake.detach())
-        errD_fake = criterion(output, label)
-        errD_fake.backward()
-        D_G_z1 = output.mean().item()
-
-        # Gradient penalty
-        gradient_penalty = compute_gradient_penalty(netD, real_cpu.data, fake.data)
+        real_joint = joint_data.to(device)
+        b_size = real_joint.size(0)
         
-        # Total Discriminator loss
+        # Generate fake joint position data
+        speech_data = speech_data.to(device)
+        fake_joint = netG(speech_data)
+        
+        # Train Discriminator
+        real_output = netD(real_joint)
+        real_label = torch.full((b_size, 1), 1, dtype=torch.float, device=device)
+        errD_real = criterion(real_output, real_label)
+        errD_real.backward()
+        
+        fake_output = netD(fake_joint.detach())
+        fake_label = torch.full((b_size, 1), 0, dtype=torch.float, device=device)
+        errD_fake = criterion(fake_output, fake_label)
+        errD_fake.backward()
+        
+        gradient_penalty = compute_gradient_penalty(netD, real_joint.data, fake_joint.data)
         errD = errD_real + errD_fake + lambda_gp * gradient_penalty
         optimizerD.step()
 
-        # Update Generator
+        # Train Generator
         netG.zero_grad()
-        label.fill_(real_label)  # Generator wants discriminator to think samples are real
-        output = netD(fake)
-        errG = criterion(output, label)
+        fake_output = netD(fake_joint)
+        errG = criterion(fake_output, real_label)
         errG.backward()
-        D_G_z2 = output.mean().item()
         optimizerG.step()
 
-        # Print progress
         if i % 50 == 0:
             print(f'[{epoch}/{num_epochs}][{i}/{len(train_loader)}] '
                   f'Loss_D: {errD.item():.4f} Loss_G: {errG.item():.4f} '
-                  f'D(x): {D_x:.4f} D(G(z)): {D_G_z1:.4f} / {D_G_z2:.4f}')
+                  f'D(x): {real_output.mean().item():.4f} D(G(z)): {fake_output.mean().item():.4f}')
 
     # Save checkpoint
     torch.save({
         'epoch': epoch,
-        'generator2.pth': netG.state_dict(),
-        'discriminator2.pth': netD.state_dict(),
-        'optimizerG_2_state_dict': optimizerG.state_dict(),
-        'optimizerD_2_state_dict': optimizerD.state_dict(),
-    }, f'/Volumes/NO NAME/ABEL-body-motion/ganimator2/checkpoint_2_epoch_{epoch}.pth')
+        'generator3.pth': netG.state_dict(),
+        'discriminator3.pth': netD.state_dict(),
+        'optimizerG_3_state_dict': optimizerG.state_dict(),
+        'optimizerD_3_state_dict': optimizerD.state_dict(),
+    }, f'/Volumes/NO NAME/ABEL-body-motion/gan3_models/checkpoint_3_epoch_{epoch}.pth')
