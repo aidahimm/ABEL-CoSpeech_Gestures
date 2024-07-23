@@ -53,29 +53,34 @@ original_speech_columns = test_speech.columns.tolist()
 subset_test_speech = test_speech[:49574]
 
 # Define the path to the saved model and PCA models
-model_path = '/Volumes/NO NAME/ABEL-body-motion/tgan2_models/best_model2.pth'
+model_path = '/Volumes/NO NAME/ABEL-body-motion/tgan2_models/best_model2222.pth'
 pca_speech_path = '/Volumes/NO NAME/ABEL-body-motion/pca_speech_model.pkl'
 pca_joint_path = '/Volumes/NO NAME/ABEL-body-motion/pca_joint_model.pkl'
 
 # Load the model classes
 class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, dropout=0.5):
+    def __init__(self, input_dim, hidden_dim, num_layers):
         super(Encoder, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout)
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        # self.dropout = nn.Dropout(dropout)
         
     def forward(self, x):
         outputs, (hidden, cell) = self.lstm(x)
+        # outputs = self.dropout(outputs)
         return hidden, cell
 
 class Decoder(nn.Module):
-    def __init__(self, output_dim, hidden_dim, num_layers, dropout=0.5):
+    def __init__(self, output_dim, hidden_dim, num_layers):
         super(Decoder, self).__init__()
-        self.lstm = nn.LSTM(output_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout)
+        self.lstm = nn.LSTM(output_dim, hidden_dim, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
+        # self.dropout = nn.Dropout(dropout)
         
     def forward(self, x, hidden, cell):
         outputs, (hidden, cell) = self.lstm(x, (hidden, cell))
+        # outputs = self.dropout(outputs)  
         predictions = self.fc(outputs)
+        # predictions = self.dropout(predictions)
         return predictions, hidden, cell
 
 class Seq2Seq(nn.Module):
@@ -90,9 +95,9 @@ class Seq2Seq(nn.Module):
         return outputs
 
 # Assume the same model parameters used during training
-input_dim = 50  # Adjust based on your PCA components
-output_dim = 50  # Adjust based on your PCA components
-hidden_dim = 256
+input_dim = 50 
+output_dim = 50  
+hidden_dim = 128
 num_layers = 2
 
 # Initialize the model
@@ -119,7 +124,7 @@ subset_test_speech_pca = pca_speech.transform(subset_test_speech)
 subset_test_speech_tensor = torch.tensor(subset_test_speech_pca, dtype=torch.float32)
 
 # Create sequences
-seq_length = 100
+seq_length = 120
 def create_sequences(data, seq_length):
     sequences = []
     for i in range(0, len(data) - seq_length + 1, seq_length):  # Non-overlapping sequences
@@ -160,7 +165,7 @@ predictions_df = pd.DataFrame(predictions_original, columns=original_joint_colum
 unnormalized_predictions_df = unnormalize_df(predictions_df, train_min[original_joint_columns], train_max[original_joint_columns])
 
 # Save predictions to a CSV file
-output_file = 'predicted_joint_positions.csv'
+output_file = 'predicted_joint_positions2222.csv'
 unnormalized_predictions_df.to_csv(output_file, index=False)
 
 

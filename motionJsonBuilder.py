@@ -3,7 +3,7 @@ import os
 import csv
 import json
 
-predictions_df = pd.read_csv('predicted_joint_positions.csv')
+predictions_df = pd.read_csv('predicted_joint_positions2222.csv')
 
 def drop_engineered_features(df):
     col_to_drop = df.filter(regex='^_rel_|^_angular_')
@@ -124,7 +124,7 @@ def populate_json_template(template, predictions):
 populated_json = populate_json_template(empty_json_template, pure_joint)
 
 # Save the populated JSON to a file
-with open('populated_joint_positions.json', 'w') as f:
+with open('populated_joint_positions2222.json', 'w') as f:
     json.dump(populated_json, f, indent=4)
 
-print("Populated JSON saved as 'populated_joint_positions.json'")
+print("Populated JSON saved as 'populated_joint_positions2222.json'")

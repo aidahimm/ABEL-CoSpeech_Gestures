@@ -1,9 +1,11 @@
 import os
 import pandas as pd
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 from torch import nn, optim
 from sklearn.decomposition import PCA
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 # Define the path to your datasets and processed files
 train_dir = '/Volumes/NO NAME/ABEL-body-motion/sets_zipped_features/Train'
@@ -19,6 +21,12 @@ def get_all_columns(directory):
         df = pd.read_csv(os.path.join(directory, file))
         all_columns.update(df.columns)
     return list(all_columns)
+
+# # Load all unique columns from train, validation, and test directories
+# all_columns = set(get_all_columns(train_dir))
+# all_columns.update(get_all_columns(val_dir))
+# all_columns.update(get_all_columns(test_dir))
+# all_columns = list(all_columns)
 
 def load_data_from_directory(directory_path):
     dfs = []
@@ -130,7 +138,7 @@ def create_sequences(data, seq_length):
         sequences.append(data[i:i+seq_length].unsqueeze(0))  # Add batch dimension
     return torch.cat(sequences, dim=0)
 
-seq_length = 150
+seq_length = 120
 
 train_speech_sequences = create_sequences(train_speech_tensor, seq_length)
 val_speech_sequences = create_sequences(val_speech_tensor, seq_length)
@@ -148,13 +156,11 @@ test_loader = DataLoader(TensorDataset(test_speech_sequences, test_joint_sequenc
 print(train_joint_tensor.shape)
 print(train_speech_tensor.shape)
 number_of_features = train_speech_tensor.shape[1]
-
 # Define the LSTM-based Generator
 class Generator(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, seq_length):
         super(Generator, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.dropout = nn.Dropout(0.3)  # Add dropout layer
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=0.3)
         self.linear = nn.Linear(hidden_dim, output_dim)
         self.sigmoid = nn.Sigmoid()
         self.seq_length = seq_length
@@ -162,23 +168,20 @@ class Generator(nn.Module):
     def forward(self, x):
         # x shape: (batch_size, seq_length, input_dim)
         lstm_out, _ = self.lstm(x)
-        lstm_out = self.dropout(lstm_out)  # Apply dropout
         out = self.linear(lstm_out)
         return self.sigmoid(out)
 
 # Define the LSTM-based Discriminator
 class Discriminator(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+    def __init__(self, input_dim, hidden_dim, num_layers):
         super(Discriminator, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.dropout = nn.Dropout(0.3)  # Add dropout layer
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=0.3)
         self.linear = nn.Linear(hidden_dim, output_dim)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         # x shape: (batch_size, seq_length, input_dim)
         lstm_out, _ = self.lstm(x)
-        lstm_out = self.dropout(lstm_out)  # Apply dropout
         out = self.linear(lstm_out[:, -1, :])  # Use the last output of the LSTM
         return self.sigmoid(out).view(-1, 1)  # Ensure the output is of shape [batch_size, 1]
 
@@ -188,39 +191,37 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Hyperparameters
 hidden_dim = 128
 num_layers = 2
-output_dim = 1
+output_dim = train_joint_sequences[2]
 batch_size = 64
 num_epochs = 25
-learning_rate_g = 0.00005  # Increased learning rate for Generator
-learning_rate_d = 0.00005  # Reduced learning rate for Discriminator
-lambda_gp = 5  # Adjusted gradient penalty coefficient
-
-def weights_init(m):
-    if isinstance(m, nn.Linear):
-        nn.init.xavier_uniform_(m.weight)
-        if m.bias is not None:
-            nn.init.zeros_(m.bias)
-    elif isinstance(m, nn.LSTM):
-        for param in m.parameters():
-            if len(param.shape) >= 2:
-                nn.init.xavier_uniform_(param.data)
-            else:
-                nn.init.zeros_(param.data)
+learning_rate_g = 0.001
+learning_rate_d = 0.001 
+lambda_gp = 10  # Gradient penalty coefficient
 
 # Loss function
 criterion = nn.BCELoss()
 
-# Initialize models
+# Update model initialization
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 input_dim = train_speech_sequences.shape[2]
-netG = Generator(input_dim, hidden_dim, output_dim, num_layers, seq_length).to(device)
-netD = Discriminator(output_dim, hidden_dim, 1, num_layers).to(device)
-
-netG.apply(weights_init)
-netD.apply(weights_init)
+netG = Generator(input_dim, hidden_dim, train_joint_sequences.shape[2], num_layers, seq_length).to(device)
+netD = Discriminator(train_joint_sequences.shape[2], hidden_dim, num_layers).to(device)
 
 # Optimizers
-optimizerG = optim.Adam(netG.parameters(), lr=learning_rate_g, betas=(0.5, 0.999))
-optimizerD = optim.Adam(netD.parameters(), lr=learning_rate_d, betas=(0.5, 0.999))
+optimizerG = optim.Adam(netG.parameters(), lr=learning_rate_g)
+optimizerD = optim.Adam(netD.parameters(), lr=learning_rate_d)
+
+
+# Add gradient clipping to prevent exploding gradients
+torch.nn.utils.clip_grad_norm_(netD.parameters(), max_norm=5.0)
+torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=5.0)
+
+# Initialize BCELoss function
+criterion = nn.BCELoss()
+
+# Label smoothing values
+real_label = 0.9
+fake_label = 0.1
 
 # Gradient penalty computation
 def compute_gradient_penalty(D, real_samples, fake_samples):
@@ -236,10 +237,15 @@ def compute_gradient_penalty(D, real_samples, fake_samples):
         retain_graph=True,
         only_inputs=True,
     )[0]
-    gradients = gradients.reshape(gradients.size(0), -1)  # Use reshape instead of view
+    gradients = gradients.reshape(gradients.size(0), -1)
     gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
     return gradient_penalty
 
+# Initialize metric storage
+train_metrics = {'epoch': [], 'Loss_D': [], 'Loss_G': [], 'MAE': [], 'RMSE':[], 'R2': []}
+val_metrics = {'epoch': [], 'MAE': [], 'RMSE': [], 'R2': []}
+
+# Training Loop
 print("Starting Training Loop...")
 for epoch in range(num_epochs):
     for i, (speech_data, joint_data) in enumerate(train_loader, 0):
@@ -273,46 +279,77 @@ for epoch in range(num_epochs):
         errG.backward()
         optimizerG.step()
 
+        # Print progress
         if i % 50 == 0:
             print(f'[{epoch}/{num_epochs}][{i}/{len(train_loader)}] '
                   f'Loss_D: {errD.item():.4f} Loss_G: {errG.item():.4f} '
                   f'D(x): {real_output.mean().item():.4f} D(G(z)): {fake_output.mean().item():.4f}')
 
-    # Validation step
-    netD.eval()
-    netG.eval()
-    val_loss_D = 0.0
-    val_loss_G = 0.0
+    # Evaluate metrics on training data
     with torch.no_grad():
-        for i, data in enumerate(val_loader, 0):
-            real_cpu = data[0].to(device)
-            b_size = real_cpu.size(0)
+        gen_joint_train = netG(train_speech_sequences.to(device))
+        train_joint_sequences_flat = train_joint_sequences.view(-1, train_joint_sequences.shape[-1]).cpu().numpy()
+        gen_joint_train_flat = gen_joint_train.view(-1, gen_joint_train.shape[-1]).cpu().numpy()
+        train_mae = mean_absolute_error(train_joint_sequences_flat, gen_joint_train_flat)
+        train_mse = mean_squared_error(train_joint_sequences_flat, gen_joint_train_flat)
+        val_rmse = np.sqrt(train_mse)
+        train_r2 = r2_score(train_joint_sequences_flat, gen_joint_train_flat)
 
-            # Generate fake data
-            noise = torch.randn(b_size, seq_length, input_dim, device=device)
-            fake = netG(noise)
+    train_metrics['epoch'].append(epoch)
+    train_metrics['Loss_D'].append(errD.item())
+    train_metrics['Loss_G'].append(errG.item())
+    train_metrics['MAE'].append(train_mae)
+    train_metrics['RMSE'].append(train_mse)
+    train_metrics['R2'].append(train_r2)
 
-            # Real data
-            real_output = netD(real_cpu)
-            real_label = torch.full((b_size, 1), 1, dtype=torch.float, device=device)
-            errD_real = criterion(real_output, real_label)
+    # Evaluate metrics on validation data
+    with torch.no_grad():
+        gen_joint_val = netG(val_speech_sequences.to(device))
+        val_joint_sequences_flat = val_joint_sequences.view(-1, val_joint_sequences.shape[-1]).cpu().numpy()
+        gen_joint_val_flat = gen_joint_val.view(-1, gen_joint_val.shape[-1]).cpu().numpy()
+        val_mae = mean_absolute_error(val_joint_sequences_flat, gen_joint_val_flat)
+        val_mse = mean_squared_error(val_joint_sequences_flat, gen_joint_val_flat)
+        val_rmse = np.sqrt(val_mse)
+        val_r2 = r2_score(val_joint_sequences_flat, gen_joint_val_flat)
+    val_metrics['epoch'].append(epoch)
+    val_metrics['MAE'].append(val_mae)
+    val_metrics['RMSE'].append(val_rmse)
+    val_metrics['R2'].append(val_r2)
 
-            # Fake data
-            fake_output = netD(fake)
-            fake_label = torch.full((b_size, 1), 0, dtype=torch.float, device=device)
-            errD_fake = criterion(fake_output, fake_label)
+    print(f'Val MAE: {val_mae:.4f}')
+    print(f'Val RMSE: {val_rmse:.4f}')
+    print(f'Val R2: {val_r2:.4f}')
 
-            # Total discriminator loss
-            val_loss_D += (errD_real + errD_fake).item()
+    # Save checkpoint
+    torch.save(netG.state_dict(), f'/Volumes/NO NAME/ABEL-body-motion/gan6_models/generator.pth')
+    torch.save(netD.state_dict(), f'/Volumes/NO NAME/ABEL-body-motion/gan6_models/discriminator.pth')
 
-            # Generator loss
-            errG = criterion(fake_output, real_label)
-            val_loss_G += errG.item()
+metrics_dir = '/Volumes/NO NAME/ABEL-body-motion/gan6_models'
+train_metrics_df = pd.DataFrame(train_metrics)
+train_metrics_df.to_csv(os.path.join(metrics_dir, 'train_metrics.csv'), index=False)
 
-    val_loss_D /= len(val_loader)
-    val_loss_G /= len(val_loader)
+val_metrics_df = pd.DataFrame(val_metrics)
+val_metrics_df.to_csv(os.path.join(metrics_dir, 'val_metrics.csv'), index=False)
 
-    print(f'Validation: Loss_D: {val_loss_D:.4f} Loss_G: {val_loss_G:.4f}')
+# Evaluate metrics on test data
+with torch.no_grad():
+    gen_joint_test = netG(test_speech_sequences.to(device))
+    test_joint_sequences_flat = test_joint_sequences.view(-1, test_joint_sequences.shape[-1]).cpu().numpy()
+    gen_joint_test_flat = gen_joint_test.view(-1, gen_joint_test.shape[-1]).cpu().numpy()
+    test_mae = mean_absolute_error(test_joint_sequences_flat, gen_joint_test_flat)
+    test_mse = mean_squared_error(test_joint_sequences_flat, gen_joint_test_flat)
+    test_rmse = np.sqrt(test_mse)
+    test_r2 = r2_score(test_joint_sequences_flat, gen_joint_test_flat)
 
-    torch.save(netG.state_dict(), "/Volumes/NO NAME/ABEL-body-motion/gan6_models/generator6.pth")
-    torch.save(netD.state_dict(), "/Volumes/NO NAME/ABEL-body-motion/gan6_models/discriminator6.pth")
+test_metrics = {
+    'MAE': [test_mae],
+    'RMSE': [test_rmse],
+    'R2': [test_r2]
+}
+
+test_metrics_df = pd.DataFrame(test_metrics)
+test_metrics_df.to_csv(os.path.join(metrics_dir, 'test_metrics.csv'), index=False)
+
+print(f'Test MAE: {test_mae:.4f}')
+print(f'Test RMSE: {test_rmse:.4f}')
+print(f'Test R2: {test_r2:.4f}')

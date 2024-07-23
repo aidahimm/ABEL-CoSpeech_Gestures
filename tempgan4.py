@@ -60,9 +60,8 @@ class Generator(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, seq_length, dropout):
         super(Generator, self).__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.linear1 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.linear2 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
-        self.linear3 = nn.Linear(hidden_dim // 4, output_dim)
+        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, output_dim)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
         self.dropout = nn.Dropout(dropout)
@@ -71,19 +70,20 @@ class Generator(nn.Module):
     def forward(self, x):
         # x shape: (batch_size, seq_length, input_dim)
         lstm_out, _ = self.lstm(x)
+        # Apply linear, ReLU, dropout, and batch normalization
         out = self.relu(self.linear1(lstm_out))
-        out = self.relu(self.linear2(out))
-        out = self.linear3(out)
+        out = self.dropout(out)
+        out = self.linear2(out)
         return self.sigmoid(out)
+
 
 # Define the LSTM-based Discriminator
 class Discriminator(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, dropout):
         super(Discriminator, self).__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.linear1 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.linear2 = nn.Linear(hidden_dim // 2, hidden_dim // 4)
-        self.linear3 = nn.Linear(hidden_dim // 4, 1)
+        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, 1)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
         self.dropout = nn.Dropout(dropout)
@@ -92,9 +92,10 @@ class Discriminator(nn.Module):
         # x shape: (batch_size, seq_length, input_dim)
         lstm_out, _ = self.lstm(x)
         out = self.relu(self.linear1(lstm_out[:, -1, :]))  # Use the last output of the LSTM
-        out = self.relu(self.linear2(out))
-        out = self.linear3(out)
+        out = self.dropout(out)
+        out = self.linear2(out)
         return self.sigmoid(out).view(-1, 1)
+
 
 class EarlyStopping:
     def __init__(self, patience=7, min_delta=0):
@@ -124,12 +125,12 @@ num_layers = 2
 output_dim = 1
 batch_size = 64
 num_epochs = 40
-learning_rate_g = 0.001  # Lower learning rate for Generator
-learning_rate_d = 0.001  # Slightly higher learning rate for Discriminator
-lambda_gp = 10  # Gradient penalty coefficient
-dropout = 0.3
-lambda_bce = 0.3
-lambda_mse = 0.7
+learning_rate_g = 0.0009  # learning rate for Generator
+learning_rate_d = 0.0007  # learning rate for Discriminator
+lambda_gp = 7  # Gradient penalty coefficient
+dropout = 0.5
+lambda_bce = 0.1
+lambda_mse = 0.9
 
 def weights_init(m):
     if isinstance(m, nn.Linear):
@@ -225,8 +226,7 @@ for epoch in range(num_epochs):
     running_loss_G = 0.0
     running_loss_D = 0.0
     for i, (speech_data, joint_data) in enumerate(train_loader, 0):
-
-        for _ in range(3):
+        for _ in range(2):
             netD.zero_grad()
             b_size = joint_data.size(0)
             real_joint = joint_data.to(device)
@@ -258,15 +258,17 @@ for epoch in range(num_epochs):
         errG.backward()
         optimizerG.step()
 
-        # #Reupdate the generator
-        # for _ in range(1):  # Update generator twice
-        #     netG.zero_grad()
-        #     fake_joint = netG(speech_data)  # Regenerate fake data
-        #     fake_output = netD(fake_joint)
-        #     errG = criterion(fake_output, real_label)  # Using real_label here
-        #     errG.backward()
-        #     optimizerG.step()
-        #     running_loss_G += errG.item()
+        #Reupdate the generator
+        for _ in range(4):  # Update generator 
+            netG.zero_grad()
+            fake_joint = netG(speech_data)  # Regenerate fake data
+            fake_output = netD(fake_joint)
+            errG = criterion(fake_output, real_label)  # Using real_label here
+            errG_mse = criterion_mse(fake_joint, real_joint)
+            errG = lambda_bce * errG + lambda_mse * errG_mse  
+            errG.backward()
+            optimizerG.step()
+            running_loss_G += errG.item()
 
         # Print progress
         if i % 50 == 0:
@@ -296,7 +298,7 @@ for epoch in range(num_epochs):
     train_metrics['Loss_G'].append(errG.item())
     train_metrics['MAE'].append(train_mae)
     train_metrics['MSE'].append(train_mse)
-    train_metrics['RMSE'].append(train_mse)
+    train_metrics['RMSE'].append(train_rmse)
     train_metrics['R2'].append(train_r2)
 
     print(f'\tTrain MAE: {train_mae:.4f}',
@@ -325,8 +327,8 @@ for epoch in range(num_epochs):
     f'Val R2: {val_r2:.4f}')
 
     # Save checkpoint
-    torch.save(netG.state_dict(), f'/Volumes/NO NAME/ABEL-body-motion/gan4_models/generator44.pth')
-    torch.save(netD.state_dict(), f'/Volumes/NO NAME/ABEL-body-motion/gan4_models/discriminator44.pth')
+    torch.save(netG.state_dict(), f'/Volumes/NO NAME/ABEL-body-motion/gan4_models/generator4444.pth')
+    torch.save(netD.state_dict(), f'/Volumes/NO NAME/ABEL-body-motion/gan4_models/discriminator4444.pth')
 
     early_stopping(val_loss)
     if early_stopping.early_stop:
@@ -338,10 +340,10 @@ for epoch in range(num_epochs):
 
 metrics_dir = '/Volumes/NO NAME/ABEL-body-motion/gan4_models'
 train_metrics_df = pd.DataFrame(train_metrics)
-train_metrics_df.to_csv(os.path.join(metrics_dir, 'train_metrics44.csv'), index=False)
+train_metrics_df.to_csv(os.path.join(metrics_dir, 'train_metrics4444.csv'), index=False)
 
 val_metrics_df = pd.DataFrame(val_metrics)
-val_metrics_df.to_csv(os.path.join(metrics_dir, 'val_metrics44.csv'), index=False)
+val_metrics_df.to_csv(os.path.join(metrics_dir, 'val_metrics4444.csv'), index=False)
 
 # Evaluate metrics on test data
 with torch.no_grad():
@@ -361,7 +363,7 @@ test_metrics = {
 }
 
 test_metrics_df = pd.DataFrame(test_metrics)
-test_metrics_df.to_csv(os.path.join(metrics_dir, 'test_metrics44.csv'), index=False)
+test_metrics_df.to_csv(os.path.join(metrics_dir, 'test_metrics4444.csv'), index=False)
 
 print(f'Test MAE: {test_mae:.4f}')
 print(f'Test MSE: {test_mse:.4f}')
